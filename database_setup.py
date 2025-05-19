@@ -53,10 +53,25 @@ def create_transaction_db():
         )
     ''')
 
+def create_trusted_devices_table():
+    conn = sqlite3.connect('safebank.db')  # or your DB name
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS trusted_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            device_id TEXT NOT NULL,
+            added_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, device_id)
+        )
+    ''')
+
+    print("✅ trusted_devices table created.")
     conn.commit()
     conn.close()
     print("✅ transaction.db created successfully!")
     print("✅ All user balances set to ₹100000")
+    print("✅ trusted_devices table created.")
 
 if __name__ == "__main__":
     create_user_db()

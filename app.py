@@ -1,7 +1,7 @@
 # app.py
 import os
 from waitress import serve
-
+from flask import request
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3
@@ -13,6 +13,8 @@ import os
 #import sms_alert
 import random
 import string
+import hashlib 
+
 
 # Continue inside app.py
 import time
@@ -20,6 +22,12 @@ import time
 # Flask App Initialization
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
+
+def get_device_id():
+    user_agent = request.headers.get('User-Agent')
+    ip = request.remote_addr
+    device_id = f"{ip}_{user_agent}"
+    return device_id
 
 # Database connection helper
 def get_db_connection():
@@ -40,6 +48,7 @@ def login():
         user = conn.execute('SELECT * FROM users WHERE email = ? OR phone = ?', (email_or_phone, email_or_phone)).fetchone()
 
         if user:
+            # Block logic as you have already
             if user['is_blocked']:
                 if user['unblock_time'] and int(time.time()) < user['unblock_time']:
                     conn.close()
@@ -49,6 +58,30 @@ def login():
                     conn.execute('UPDATE users SET is_blocked = 0, unblock_time = NULL WHERE id = ?', (user['id'],))
                     conn.commit()
 
+            # Get device info
+            device_id = get_device_id()
+            # Generate unique device fingerprint
+            device_id = hashlib.sha256((user_agent + ip_address).encode()).hexdigest()
+
+            # Check if device trusted
+            trusted_device = conn.execute('SELECT * FROM trusted_devices WHERE user_id = ? AND device_id = ?', (user['id'], device_id)).fetchone()
+
+            if not trusted_device:
+               # New device – send email
+                verification_link = f"https://safebank-jr00.onrender.com/trust_device?user_id={user['id']}&device_id={device_id}"
+                email_alert.send_new_device_verification_email(user['email'], verification_link, user_agent, ip_address)
+                flash('🚨 New device detected. Verification email sent. Please verify.', 'warning')
+                conn.close()
+                return render_template('login.html')  # Stop login until user clicks "This is me"
+
+    # Device already trusted – proceed to dashboard
+    flash('Login Successful!', 'success')
+    session.pop('pending_receiver', None)
+    session.pop('pending_amount', None)
+    session.pop('otp_retries', None)
+    conn.close()
+    return redirect(url_for('dashboard'))
+            # If device is trusted, proceed with your device/location alerts as you have now
             user_agent = request.headers.get('User-Agent')
             ip_address = request.remote_addr
 
@@ -71,8 +104,7 @@ def login():
                 conn.execute('UPDATE users SET device_info = ?, last_ip = ? WHERE id = ?', (user_agent, ip_address, user['id']))
                 conn.commit()
 
-            conn.close()
-
+            # Password check
             if check_password_hash(user['password'], password):
                 session['user_id'] = user['id']
                 session['user_name'] = user['name']
@@ -82,12 +114,27 @@ def login():
                 session.pop('pending_receiver', None)
                 session.pop('pending_amount', None)
                 session.pop('otp_retries', None)
+                conn.close()
                 return redirect(url_for('dashboard'))
             else:
                 conn.close()
                 flash('Invalid Email/Phone or Password!', 'error')
 
     return render_template('login.html')
+@app.route('/trust_device')
+def trust_device():
+    user_id = request.args.get('user_id')
+    device_id = request.args.get('device_id')
+
+    conn = get_db_connection()
+    conn.execute('''
+        INSERT OR IGNORE INTO trusted_devices (user_id, device_id) VALUES (?, ?)
+    ''', (user_id, device_id))
+    conn.commit()
+    conn.close()
+
+    return "✅ This device is now trusted. You can now go back and log in again."
+
 @app.route('/trust_location')
 def trust_location():
     email = request.args.get('email')
@@ -135,6 +182,38 @@ def verify_login_otp():
                 flash(f'Wrong OTP! Attempts left: {3 - session["otp_retries"]}', 'error')
 
     return render_template('verify_login_otp.html')
+
+@app.route('/confirm_device')
+def confirm_device():
+    user_id = request.args.get('user_id')
+    device_id = request.args.get('device_id')
+    response = request.args.get('response')  # yes or no
+
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+
+    if not user:
+        conn.close()
+        return "Invalid confirmation link."
+
+    if response == 'yes':
+        # Add device to trusted_devices
+        conn.execute('INSERT OR IGNORE INTO trusted_devices (user_id, device_id) VALUES (?, ?)', (user_id, device_id))
+        conn.commit()
+        conn.close()
+        return "✅ Device confirmed! You can now login from this device."
+
+    else:
+        # Response is 'no' → security action
+        # Block user or force password reset (implement your logic here)
+        conn.execute('UPDATE users SET is_blocked = 1, unblock_time = ? WHERE id = ?', (int(time.time()) + 3600, user_id))
+        conn.commit()
+        conn.close()
+        return "🚫 Suspicious login attempt blocked. We’ve locked your account. Please reset your password."
+
+        # Send alert email to user (implement this function)
+        email_alert.send_security_alert_email(user['email'])
+        return "Security measures activated. Please reset your password immediately."
 
 
 # Register Page
