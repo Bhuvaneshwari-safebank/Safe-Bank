@@ -45,46 +45,47 @@ def login():
         password = request.form['password']
 
         conn = get_db_connection()
-        user = conn.execute('SELECT * FROM users WHERE email = ? OR phone = ?', (email_or_phone, email_or_phone)).fetchone()
+        user = conn.execute(
+            'SELECT * FROM users WHERE email = ? OR phone = ?',
+            (email_or_phone, email_or_phone)
+        ).fetchone()
 
         if user:
-            # Block logic as you have already
+            # Block logic
             if user['is_blocked']:
                 if user['unblock_time'] and int(time.time()) < user['unblock_time']:
                     conn.close()
                     flash("Account temporarily blocked. Try again later.", "error")
                     return render_template('login.html')
                 else:
-                    conn.execute('UPDATE users SET is_blocked = 0, unblock_time = NULL WHERE id = ?', (user['id'],))
+                    conn.execute(
+                        'UPDATE users SET is_blocked = 0, unblock_time = NULL WHERE id = ?',
+                        (user['id'],)
+                    )
                     conn.commit()
 
-            # Get device info
-            device_id = get_device_id()
-            # Generate unique device fingerprint
+            # Get headers info
+            user_agent = request.headers.get('User-Agent')
+            ip_address = request.remote_addr
+
+            # Generate device ID
             device_id = hashlib.sha256((user_agent + ip_address).encode()).hexdigest()
 
-            # Check if device trusted
-            trusted_device = conn.execute('SELECT * FROM trusted_devices WHERE user_id = ? AND device_id = ?', (user['id'], device_id)).fetchone()
+            # Check if device is trusted
+            trusted_device = conn.execute(
+                'SELECT * FROM trusted_devices WHERE user_id = ? AND device_id = ?',
+                (user['id'], device_id)
+            ).fetchone()
 
             if not trusted_device:
-               # New device – send email
+                # New device – send verification email
                 verification_link = f"https://safebank-jr00.onrender.com/trust_device?user_id={user['id']}&device_id={device_id}"
                 email_alert.send_new_device_verification_email(user['email'], verification_link, user_agent, ip_address)
                 flash('🚨 New device detected. Verification email sent. Please verify.', 'warning')
                 conn.close()
-                return render_template('login.html')  # Stop login until user clicks "This is me"
+                return render_template('login.html')  # Stop login until verified
 
-    # Device already trusted – proceed to dashboard
-    flash('Login Successful!', 'success')
-    session.pop('pending_receiver', None)
-    session.pop('pending_amount', None)
-    session.pop('otp_retries', None)
-    conn.close()
-    return redirect(url_for('dashboard'))
-            # If device is trusted, proceed with your device/location alerts as you have now
-            user_agent = request.headers.get('User-Agent')
-            ip_address = request.remote_addr
-
+            # Check for trusted location (last 30 days)
             trusted = conn.execute('''
                 SELECT * FROM trusted_locations 
                 WHERE email = ? AND ip = ? AND added_time > datetime("now", "-30 days")
@@ -97,14 +98,18 @@ def login():
                 session.pop('new_location', None)
                 session.pop('new_ip', None)
 
+            # Device info alert
             if user['device_info']:
                 if user_agent != user['device_info'] or ip_address != user['last_ip']:
                     email_alert.send_new_device_alert(user['email'], user_agent, ip_address)
             else:
-                conn.execute('UPDATE users SET device_info = ?, last_ip = ? WHERE id = ?', (user_agent, ip_address, user['id']))
+                conn.execute(
+                    'UPDATE users SET device_info = ?, last_ip = ? WHERE id = ?',
+                    (user_agent, ip_address, user['id'])
+                )
                 conn.commit()
 
-            # Password check
+            # Check password
             if check_password_hash(user['password'], password):
                 session['user_id'] = user['id']
                 session['user_name'] = user['name']
@@ -121,6 +126,7 @@ def login():
                 flash('Invalid Email/Phone or Password!', 'error')
 
     return render_template('login.html')
+
 @app.route('/trust_device')
 def trust_device():
     user_id = request.args.get('user_id')
